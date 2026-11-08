@@ -1,3 +1,4 @@
+
 # Projet EauSolidaire – Plateforme de Suivi des Points d'Eau au Mali
 
 Plateforme web de suivi des infrastructures hydrauliques (forages, puits, bornes-fontaines), des équipements, des pannes, des stocks de pièces détachées et des interventions de maintenance au Mali.
@@ -99,3 +100,6 @@ python manage.py runserver
 ### Gestion des Équipements dans le Frontend
 - Dans l'espace Administrateur (**Points d'eau**), la section **« Équipements installés sur les points d'eau »** permet de rechercher, ajouter (`Ajouter un équipement`), modifier l'état de fonctionnement et supprimer des équipements en temps réel dans MySQL, en réutilisant strictement les composants visuels existants (`table()`, `modal()`, `badge()`).
 - Les équipements d'un point d'eau sont également affichés dans la fiche détail de la **Cartographie** et peuvent être sélectionnés lors de la **Déclaration d'une panne**.
+=======
+# EauSolidaire
+>>>>>>> f2458aff72cc1037b026b21f39e8af9a0dfb8695
