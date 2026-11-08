@@ -136,3 +136,14 @@ class MessageContact(models.Model):
 
     def __str__(self):
         return f"{self.sujet} - {self.nom_complet} ({self.email})"
+
+    def to_frontend_dict(self):
+        return {
+            'id': self.id,
+            'sj': self.sujet,
+            'nom': self.nom_complet,
+            'email': self.email,
+            'msg': self.message,
+            'traite': self.traite,
+            'date': self.date_envoi.strftime('%d/%m/%Y %H:%M') if self.date_envoi else '',
+        }

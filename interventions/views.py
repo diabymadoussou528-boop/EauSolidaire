@@ -6,7 +6,7 @@ from pannes.models import Panne
 from points_eau.models import HistoriqueEtatPointEau
 from stock.models import PieceDetachee, MouvementStock
 from techniciens.models import Technicien
-from utilisateurs.models import Notification
+from utilisateurs.models import Utilisateur, Notification
 from .models import Intervention, PieceUtiliseeIntervention
 
 
@@ -22,9 +22,12 @@ def api_affecter_technicien(request):
         data = request.POST
 
     panne_id = data.get('id')
+    pt_ref = (data.get('pt') or '').strip()
     tech_nom = (data.get('t') or data.get('technicien') or '').strip()
 
     panne = Panne.objects.filter(id=panne_id).select_related('point_eau').first()
+    if not panne and pt_ref:
+        panne = Panne.objects.filter(point_eau__identifiant=pt_ref).select_related('point_eau').order_by('-id').first()
     if not panne or not tech_nom:
         return JsonResponse({'ok': False, 'error': 'Panne ou technicien invalide.'}, status=400)
 
@@ -45,7 +48,23 @@ def api_affecter_technicien(request):
     panne.statut = 'Technicien affecté'
     panne.save()
 
-    Notification.objects.create(message=f"Intervention créée pour {technicien.nom_complet} ({panne.point_eau.identifiant})")
+    Notification.objects.create(
+        utilisateur=None,
+        message=f"Intervention créée pour {technicien.nom_complet} ({panne.point_eau.identifiant})",
+    )
+    tech_user = technicien.utilisateur or Utilisateur.objects.filter(
+        role='TECHNICIEN', nom_complet__iexact=technicien.nom_complet
+    ).first()
+    if tech_user:
+        Notification.objects.create(
+            utilisateur=tech_user,
+            message=f"Nouvelle intervention affectée : {panne.point_eau.identifiant}",
+        )
+    if panne.signale_par and panne.signale_par.frontend_role_code != 'admin':
+        Notification.objects.create(
+            utilisateur=panne.signale_par,
+            message=f"Technicien affecté ({technicien.nom_complet}) : {panne.point_eau.identifiant}",
+        )
     return JsonResponse({'ok': True, 'panne': panne.to_frontend_dict(), 'intervention_id': intervention.id})
 
 
@@ -61,7 +80,10 @@ def api_demarrer_intervention(request):
         data = request.POST
 
     panne_id = data.get('id')
+    pt_ref = (data.get('pt') or '').strip()
     panne = Panne.objects.filter(id=panne_id).select_related('point_eau').first()
+    if not panne and pt_ref:
+        panne = Panne.objects.filter(point_eau__identifiant=pt_ref).select_related('point_eau').order_by('-id').first()
     if not panne:
         return JsonResponse({'ok': False, 'error': 'Panne introuvable.'}, status=404)
 
@@ -83,7 +105,11 @@ def api_demarrer_intervention(request):
         note='Intervention démarrée',
     )
 
-    Notification.objects.create(message=f"Statut modifié : {pt.identifiant}")
+    Notification.objects.create(utilisateur=None, message=f"Statut modifié : {pt.identifiant}")
+    if request.user.frontend_role_code != 'admin':
+        Notification.objects.create(utilisateur=request.user, message=f"Intervention démarrée : {pt.identifiant}")
+    if panne.signale_par and panne.signale_par != request.user and panne.signale_par.frontend_role_code != 'admin':
+        Notification.objects.create(utilisateur=panne.signale_par, message=f"Intervention en cours : {pt.identifiant}")
     return JsonResponse({'ok': True, 'panne': panne.to_frontend_dict()})
 
 
@@ -99,12 +125,15 @@ def api_terminer_intervention(request):
         data = request.POST
 
     panne_id = data.get('id')
+    pt_ref = (data.get('pt') or '').strip()
     compte_rendu = (data.get('r') or data.get('travaux_realises') or '').strip()
     piece_ref = (data.get('piece_ref') or '').strip()
     quantite = int(data.get('q') or 1)
     cout = data.get('cout') or 0
 
     panne = Panne.objects.filter(id=panne_id).select_related('point_eau').first()
+    if not panne and pt_ref:
+        panne = Panne.objects.filter(point_eau__identifiant=pt_ref).select_related('point_eau').order_by('-id').first()
     if not panne or not compte_rendu:
         return JsonResponse({'ok': False, 'error': 'Compte rendu obligatoire.'}, status=400)
 
@@ -166,7 +195,11 @@ def api_terminer_intervention(request):
         note=f"Intervention terminée : {compte_rendu[:80]}",
     )
 
-    Notification.objects.create(message=f"Intervention terminée : {pt.identifiant}")
+    Notification.objects.create(utilisateur=None, message=f"Intervention terminée : {pt.identifiant}")
+    if request.user.frontend_role_code != 'admin':
+        Notification.objects.create(utilisateur=request.user, message=f"Intervention terminée : {pt.identifiant}")
+    if panne.signale_par and panne.signale_par != request.user and panne.signale_par.frontend_role_code != 'admin':
+        Notification.objects.create(utilisateur=panne.signale_par, message=f"Panne résolue : {pt.identifiant}")
     return JsonResponse({
         'ok': True,
         'panne': panne.to_frontend_dict(),

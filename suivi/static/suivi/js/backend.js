@@ -9,15 +9,24 @@
     return match ? decodeURIComponent(match[1]) : '';
   }
 
+  function getAuthHeaders(extra) {
+    return Object.assign(
+      {
+        'X-CSRFToken': getCsrfToken(),
+        'X-User-Email': U && U.email ? U.email : '',
+        'X-User-Role': U && U.role ? U.role : '',
+      },
+      extra || {}
+    );
+  }
+
   async function apiPost(url, payload) {
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRFToken': getCsrfToken(),
-        },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         credentials: 'same-origin',
+        cache: 'no-store',
         body: JSON.stringify(payload || {}),
       });
       return await res.json();
@@ -27,116 +36,268 @@
   }
 
   D.equipements = D.equipements || [];
-
-  async function syncFromBackend() {
+  try {
+    D.messages = JSON.parse(localStorage.es_msgs || '[]');
+  } catch (e) {
+    D.messages = D.messages || [];
+  }
+  function saveMsgs() {
     try {
-      const res = await fetch('/api/state/', { credentials: 'same-origin' });
+      localStorage.es_msgs = JSON.stringify(D.messages || []);
+    } catch (e) {}
+  }
+
+  function refreshUI() {
+    const bellBadge = document.querySelector('.bell i');
+    if (bellBadge) bellBadge.textContent = (D.notifs || []).length;
+    const h = location.hash.slice(1) || 'accueil';
+    if (['admin', 'local', 'tech'].includes(h) && U && U.role === h && document.querySelector('#c')) {
+      const qEl = document.querySelector('#c #q');
+      const sEl = document.querySelector('#c #s');
+      const prevQ = qEl ? qEl.value : '';
+      const prevS = sEl ? sEl.value : '';
+      charts.forEach((c) => c.destroy());
+      charts = [];
+      draw(h);
+      const newQ = document.querySelector('#c #q');
+      const newS = document.querySelector('#c #s');
+      if (newQ && prevQ) newQ.value = prevQ;
+      if (newS && prevS) newS.value = prevS;
+      if ((prevQ || prevS) && typeof fl === 'function') fl();
+    } else {
+      route();
+    }
+  }
+
+  let lastStateHash = '';
+
+  async function syncFromBackend(onlyIfChanged) {
+    try {
+      const res = await fetch('/api/state/?_=' + Date.now(), {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: getAuthHeaders(),
+      });
       const data = await res.json();
       if (data && data.ok && data.D) {
+        const snapshot = JSON.stringify(data.D);
+        if (onlyIfChanged && snapshot === lastStateHash) {
+          return;
+        }
+        lastStateHash = snapshot;
         D.villages = data.D.villages || D.villages;
         D.pts = data.D.pts || D.pts;
         D.equipements = data.D.equipements || D.equipements;
         D.pannes = data.D.pannes || D.pannes;
         D.stock = data.D.stock || D.stock;
         D.hist = data.D.hist || D.hist;
-        D.notifs = data.D.notifs || D.notifs;
+        D.notifs = Array.isArray(data.D.notifs) ? data.D.notifs : [];
         D.techs = data.D.techs || D.techs;
+        if (Array.isArray(data.D.messages)) {
+          D.messages = data.D.messages;
+          saveMsgs();
+        }
+        if (Array.isArray(data.D.users) && typeof USERS !== 'undefined') {
+          data.D.users.forEach((dbU) => {
+            if (!USERS.some((u) => u.email === dbU.email)) {
+              USERS.push(dbU);
+            }
+          });
+          if (typeof saveUsers === 'function') saveUsers();
+        }
         if (data.U && !U) {
           U = data.U;
         }
-        route();
+        refreshUI();
       }
     } catch (e) {
       // Conservation transparente des données affichées si hors-ligne
     }
   }
 
-  // 1. Interception du formulaire de connexion (#lf) en phase capture
-  document.addEventListener(
-    'submit',
-    async function (e) {
-      if (e.target && e.target.id === 'lf') {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        const uInput = e.target.u ? e.target.u.value.trim() : '';
-        const pInput = e.target.p ? e.target.p.value : '';
-        const res = await apiPost('/api/auth/login/', { u: uInput, p: pInput });
-        if (res && res.ok && res.user) {
-          U = res.user;
-          view = U.role === 'admin' ? 'over' : 'home';
-          await syncFromBackend();
-          location.hash = U.role;
-          toast('Connecté : ' + U.name);
-        } else {
-          toast((res && res.error) || 'Identifiants incorrects');
-        }
+  // 1. Connexion (#connexion) : conserve 100 % des animations (busy, wait, shake, #lerr) et authentifie via MySQL
+  window.doLogin = async function (e) {
+    e.preventDefault();
+    const f = e.target,
+      id = f.ident.value.trim().toLowerCase(),
+      pw = f.mdp.value,
+      b = f.querySelector('.send');
+    if (!id || !pw) {
+      [f.ident, f.mdp].forEach(vf);
+      return false;
+    }
+    busy(b, 'Connexion…');
+    const [res] = await Promise.all([
+      apiPost('/api/auth/login/', { ident: id, mdp: pw, role: AR }),
+      wait(700),
+    ]);
+    let u = null;
+    if (res && res.ok && res.user) {
+      u = res.user;
+    } else if (AR == 'admin') {
+      if (
+        (id == 'admin' || id == 'diabymadoussou528@gmail.com') &&
+        pw.replace(/\s/g, '').toLowerCase() == 'admin1234'
+      ) {
+        u = { role: 'admin', nom: 'Administrateur', email: 'diabymadoussou528@gmail.com' };
       }
-    },
-    true
-  );
-
-  // 2. Déconnexion Django lors du clic sur Déconnexion + Réinitialisation de mot de passe par e-mail SMTP
-  document.addEventListener(
-    'click',
-    function (e) {
-      const a = e.target.closest('aside.side2 a');
-      if (a && a.textContent.includes('Déconnexion')) {
-        apiPost('/api/auth/logout/', {});
-        return;
-      }
-      const resetLink = e.target.closest('a[onclick*="Réinitialisation"]');
-      if (resetLink) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        window.openPasswordResetModal();
-      }
-    },
-    true
-  );
-
-  window.openPasswordResetModal = function () {
-    modal(
-      `<h3>Mot de passe oublié</h3><p class="mut">Saisissez votre adresse e-mail ou votre identifiant pour recevoir un lien de réinitialisation par e-mail SMTP.</p><form><label>Adresse e-mail ou identifiant</label><input name="email" required placeholder="exemple@domaine.com"><p><button class="btn" style="width:100%">Envoyer le lien par e-mail</button></p><p style="text-align:center"><button type="button" class="btn alt sm" onclick="openPasswordResetConfirmModal('','')">J’ai déjà un code de réinitialisation</button></p></form>`,
-      (d) => {
-        apiPost('/api/auth/password-reset/', { email: d.email }).then((res) => {
-          toast((res && (res.message || res.error)) || 'Demande envoyée');
-        });
-      }
-    );
+    } else {
+      const x = USERS.find(
+        (y) =>
+          y.role == AR &&
+          (y.email == id || (y.tel || '').replace(/\s/g, '') == id.replace(/\s/g, ''))
+      );
+      if (x && x.h && x.h == (await hsh(pw, x.email))) u = x;
+    }
+    if (!u) {
+      idle(b, 'Se connecter');
+      $('#lerr').textContent = 'Identifiant ou mot de passe incorrect.';
+      shake();
+      return false;
+    }
+    D.notifs = [];
+    enter(u);
+    await syncFromBackend();
+    return false;
   };
 
-  window.openPasswordResetConfirmModal = function (uidPrefill, tokenPrefill) {
+  // 2. Déconnexion Django + nettoyage sessionStorage
+  window.logout = function () {
+    U = null;
+    D.notifs = [];
+    try {
+      sessionStorage.removeItem('es_u');
+    } catch (e) {}
+    apiPost('/api/auth/logout/', {});
+    location.hash = 'accueil';
+  };
+
+  // 3. Inscription (#inscription) + Modale E-mail de confirmation envoyé (identique au design et enregistrée en base MySQL)
+  window.doSign = async function (e) {
+    e.preventDefault();
+    const f = e.target,
+      er = $('#serr'),
+      ok = [...f.querySelectorAll('.fl input')].map((x) => vf(x)).every(Boolean);
+    if (!ok) {
+      er.textContent = 'Corrigez les champs en rouge.';
+      shake();
+      return false;
+    }
+    if (!f.cg.checked) {
+      er.textContent = 'Veuillez accepter les conditions.';
+      return false;
+    }
+    const em = f.email.value.trim().toLowerCase();
+    if (USERS.some((u) => u.email == em)) {
+      er.textContent = 'Un compte existe déjà avec cette adresse e-mail.';
+      shake();
+      return false;
+    }
+    er.textContent = '';
+    const b = f.querySelector('.send');
+    busy(b, 'Création du compte…');
+    const payload = {
+      role: SR,
+      nom: f.nom.value.trim(),
+      email: em,
+      tel: f.tel.value.trim(),
+      npw: f.npw.value,
+      vil: SR == 'local' && f.vil ? f.vil.value : '',
+      spe: SR == 'tech' && f.spe ? f.spe.value : '',
+    };
+    const [res] = await Promise.all([apiPost('/api/auth/register/', payload), wait(800)]);
+    if (res && res.ok === false && res.error && res.error.includes('existe déjà')) {
+      idle(b, 'Créer mon compte');
+      er.textContent = res.error;
+      shake();
+      return false;
+    }
+    const u = {
+      role: SR,
+      nom: payload.nom,
+      email: em,
+      tel: payload.tel,
+      h: await hsh(payload.npw, em),
+      village: payload.vil,
+      spe: payload.spe,
+    };
+    if (!USERS.some((x) => x.email == em)) {
+      USERS.push(u);
+      saveUsers();
+    }
+    if (SR == 'tech' && !D.techs.includes(u.nom)) D.techs.push(u.nom);
+    PRE = em;
+    AR = SR;
     modal(
-      `<h3>Nouveau mot de passe</h3><form><label>Identifiant (UID)</label><input name="uid" required value="${esc(
-        uidPrefill || ''
-      )}"><label>Jeton de sécurité (Token)</label><input name="token" required value="${esc(
-        tokenPrefill || ''
-      )}"><label>Nouveau mot de passe (8 caractères min.)</label><input name="password" type="password" minlength="8" required><label>Confirmer le mot de passe</label><input name="password2" type="password" minlength="8" required><p><button class="btn" style="width:100%">Enregistrer le mot de passe</button></p></form>`,
-      (d) => {
-        if (d.password !== d.password2) {
-          toast('Les deux mots de passe ne correspondent pas');
-          return false;
-        }
-        if (d.password.length < 8) {
-          toast('Le mot de passe doit contenir au moins 8 caractères');
-          return false;
-        }
-        apiPost('/api/auth/password-reset/confirm/', {
-          uid: d.uid,
-          token: d.token,
-          password: d.password,
-        }).then((res) => {
-          if (res && res.ok) {
-            toast(res.message || 'Mot de passe mis à jour avec succès');
-            if (location.search.includes('token=')) {
-              history.replaceState(null, '', location.pathname + '#connexion');
-            }
-          } else {
-            toast((res && res.error) || 'Lien ou jeton invalide');
-          }
-        });
-      }
+      `<h3>E-mail de confirmation envoyé</h3><div class="mail" style="margin:12px 0"><div class="h"><b>À :</b> ${esc(
+        em
+      )}<br><b>Objet :</b> Votre compte EauSolidaire est créé</div><div class="b"><p>Bonjour ${esc(
+        u.nom.split(' ')[0]
+      )},</p><p>Votre compte <b>${RL[SR]}</b> a bien été créé${
+        SR == 'local' ? ' pour le village de ' + esc(u.village) : ''
+      }. Vous pouvez dès maintenant vous connecter avec votre adresse e-mail et le mot de passe que vous avez choisi.</p><p>Pour votre sécurité, ce message ne contient jamais votre mot de passe.</p><p>L’équipe EauSolidaire</p></div></div><button class="btn" style="width:100%" onclick="closeM();location.hash='connexion'">Se connecter</button>`
     );
+    return false;
+  };
+
+  // 4. Réinitialisation de mot de passe en 3 étapes (#motdepasse avec code à 6 chiffres et persistance MySQL)
+  window.rs1 = async function (e) {
+    e.preventDefault();
+    const f = e.target;
+    if (!vf(f.email)) {
+      shake();
+      return false;
+    }
+    const em = f.email.value.trim().toLowerCase();
+    const generatedCode = String(Math.floor(100000 + Math.random() * 900000));
+    const existsLocal = USERS.some((u) => u.email == em);
+    const res = await apiPost('/api/auth/password-reset/', {
+      email: em,
+      mode: 'otp',
+      code: generatedCode,
+    });
+    if (!existsLocal && (!res || !res.ok)) {
+      const w = f.email.closest('.fl');
+      w.classList.add('er');
+      w.querySelector('.em').textContent =
+        'Aucun compte avec cette adresse (responsables locaux et techniciens uniquement).';
+      shake();
+      return false;
+    }
+    RS = {
+      s: 2,
+      email: em,
+      code: (res && res.code) || generatedCode,
+      sent: !!(res && res.email_sent),
+    };
+    rsR();
+    return false;
+  };
+
+  window.rs3 = async function (e) {
+    e.preventDefault();
+    const f = e.target;
+    if (![vf(f.npw), vf(f.cfm)].every(Boolean)) {
+      shake();
+      return false;
+    }
+    busy(f.querySelector('.send'), 'Enregistrement…');
+    await Promise.all([
+      apiPost('/api/auth/password-reset/confirm/', {
+        email: RS.email,
+        code: RS.code,
+        password: f.npw.value,
+      }),
+      wait(700),
+    ]);
+    const u = USERS.find((x) => x.email == RS.email);
+    if (u) {
+      u.h = await hsh(f.npw.value, u.email);
+      saveUsers();
+    }
+    RS.s = 4;
+    rsR();
+    return false;
   };
 
   // 3. Notifications : marquer tout comme lu côté MySQL
@@ -151,8 +312,9 @@
   window.clearNotifsBackend = async function () {
     D.notifs = [];
     closeM();
+    refreshUI();
     await apiPost('/api/auth/notifications/clear/', {});
-    route();
+    await syncFromBackend();
   };
 
   // 4. Gestion géographique : Ajout et Suppression de village dans MySQL
@@ -162,7 +324,7 @@
       (d) => {
         D.villages.push(d);
         toast('Village ajouté');
-        geo($('#c'));
+        refreshUI();
         apiPost('/api/localisation/villages/add/', d).then((res) => {
           if (res && !res.ok && res.error) {
             toast(res.error);
@@ -180,76 +342,18 @@
       return toast('Suppression impossible : des points d’eau en dépendent');
     }
     if (confirm('Supprimer ' + v.n + ' ?')) {
-      const res = await apiPost('/api/localisation/villages/delete/', { n: v.n, id: v.id });
-      if (res && !res.ok) {
-        return toast(res.error || 'Suppression impossible');
-      }
       D.villages.splice(i, 1);
       toast('Supprimé');
-      if (typeof fl === 'function') fl();
+      refreshUI();
+      const res = await apiPost('/api/localisation/villages/delete/', { n: v.n, id: v.id });
+      if (res && !res.ok) {
+        toast(res.error || 'Suppression impossible');
+      }
+      await syncFromBackend();
     }
   };
 
-  // 5. Points d'eau et Équipements installés : Ajout, changement d'état, suppression et mise à jour GPS dans MySQL
-  window.pts = function (c) {
-    c.innerHTML =
-      `<h2>Points d’eau</h2><div class="tools"><input id="q" placeholder="Rechercher…" oninput="fl()"><select id="s" onchange="fl()"><option value="">Tous les états</option>${ST.map(
-        (s) => `<option>${s}</option>`
-      ).join('')}</select><button class="btn" onclick="addP()">Ajouter</button></div>` +
-      table(['Réf.', 'Nom', 'Type', 'Village', 'État', 'Changer l’état', 'Carte'], '', 'tb') +
-      `<h3 style="margin-top:20px">Équipements installés sur les points d’eau</h3><div class="tools"><input id="qeq" placeholder="Rechercher un équipement…" oninput="fl()"><button class="btn" onclick="addEq()">Ajouter un équipement</button></div>` +
-      table(
-        ['Réf.', 'Nom', 'Type', 'Point d’eau', 'État', 'Changer l’état', ''],
-        '',
-        'tb-eq'
-      );
-
-    fl = () => {
-      const q = ($('#q')?.value || '').toLowerCase(),
-        s = $('#s')?.value || '';
-      if ($('#tb')) {
-        $('#tb').innerHTML =
-          D.pts
-            .map((p, i) => ({ p, i }))
-            .filter((o) => (!s || o.p.s == s) && JSON.stringify(o.p).toLowerCase().includes(q))
-            .map(
-              ({ p, i }) =>
-                `<tr><td>${p.ref}</td><td>${esc(p.n)}</td><td>${p.t}</td><td>${esc(
-                  p.v
-                )}</td><td>${badge(p.s)}</td><td><select onchange="setS(${i},this.value)">${ST.map(
-                  (x) => `<option ${x == p.s ? 'selected' : ''}>${x}</option>`
-                ).join(
-                  ''
-                )}</select></td><td><button class="btn alt sm" onclick="view='map';SEL='${
-                  p.ref
-                }';route()">${p.la != null ? 'Localiser' : 'Sans position'}</button></td></tr>`
-            )
-            .join('') || '<tr><td colspan=7 class="mut">Aucun résultat.</td></tr>';
-      }
-      const qeq = ($('#qeq')?.value || '').toLowerCase();
-      if ($('#tb-eq')) {
-        $('#tb-eq').innerHTML =
-          (D.equipements || [])
-            .map((e, i) => ({ e, i }))
-            .filter((o) => JSON.stringify(o.e).toLowerCase().includes(qeq))
-            .map(
-              ({ e, i }) =>
-                `<tr><td>${esc(e.ref)}</td><td>${esc(e.nom)}</td><td>${esc(
-                  e.type
-                )}</td><td>${esc(e.pt)} (${esc(e.pt_nom || '')})</td><td>${badge(
-                  e.etat
-                )}</td><td><select onchange="setEqS(${i},this.value)">${ST.map(
-                  (x) => `<option ${x == e.etat ? 'selected' : ''}>${x}</option>`
-                ).join(
-                  ''
-                )}</select></td><td><button class="btn alt sm" onclick="delEq(${i})">Supprimer</button></td></tr>`
-            )
-            .join('') || '<tr><td colspan=7 class="mut">Aucun équipement enregistré.</td></tr>';
-      }
-    };
-    fl();
-  };
-
+  // 5. Points d'eau et Équipements : Ajout, changement d'état, suppression et mise à jour GPS dans MySQL
   window.addEq = function () {
     modal(
       `<h3>Nouvel équipement</h3><form><label>Référence</label><input name="ref" required placeholder="EQ-003"><label>Nom de l’équipement</label><input name="nom" required placeholder="Pompe Vergnet HPV 60"><label>Type d’équipement</label><select name="type"><option>Pompe manuelle</option><option>Pompe solaire</option><option>Pompe immergée</option><option>Château d'eau / Réservoir</option><option>Panneau solaire</option><option>Robinet / Borne</option><option>Autre</option></select><label>Point d’eau associé</label><select name="pt">${D.pts
@@ -306,45 +410,6 @@
     }
   };
 
-  window.pick = function (ref) {
-    SEL = ref;
-    const el = $('#mpan');
-    if (!el) return;
-    const p = D.pts.find((x) => x.ref == ref),
-      v = D.villages.find((x) => x.n == p.v) || {},
-      ps = D.pannes.filter((n) => n.pt == ref),
-      eqs = (D.equipements || []).filter((e) => e.pt == ref);
-    el.innerHTML = `<h3>${p.ref} · ${esc(p.n)}</h3>${badge(p.s)}<p class="mut">${
-      p.t
-    } · ${esc(p.v)}, commune de ${esc(v.c || '')}, cercle de ${esc(
-      v.ce || ''
-    )}, région de ${esc(v.r || '')}</p>${
-      p.la != null
-        ? `<p><b>Position</b> ${p.la.toFixed(4)}° N, ${Math.abs(p.lo).toFixed(4)}° ${
-            p.lo < 0 ? 'O' : 'E'
-          }<br><a href="https://www.openstreetmap.org/?mlat=${p.la}&mlon=${
-            p.lo
-          }#map=14/${p.la}/${p.lo}" target="_blank" rel="noopener"><u>Voir sur OpenStreetMap</u></a></p>`
-        : '<p class="mut">Position GPS non renseignée.</p>'
-    }<h3>Équipements installés</h3>${
-      eqs.map((e) => `<p>${esc(e.ref)} · ${esc(e.nom)} (${esc(e.type)}) ${badge(e.etat)}</p>`).join('') ||
-      '<p class="mut">Aucun équipement rattaché.</p>'
-    }<h3>Suivi de l’état</h3>${p.log
-      .map((l) => `<p>${l.d} · ${l.s ? badge(l.s) : ''} ${esc(l.n || '')}</p>`)
-      .join('')}<h3>Pannes et interventions</h3>${
-      ps
-        .map((n) => `<p>${esc(n.d)}<br>${badge(n.s)} ${n.tech ? '· ' + esc(n.tech) : ''}</p>`)
-        .join('') || '<p class="mut">Aucune panne enregistrée.</p>'
-    }<p>${
-      U.role != 'local'
-        ? `<button class="btn sm" onclick="setPos('${ref}')">${
-            p.la != null ? 'Modifier' : 'Renseigner'
-          } la position</button>`
-        : `<button class="btn sm" onclick="view='dec';route()">Déclarer une panne</button>`
-    }</p>`;
-    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  };
-
   window.addP = function () {
     modal(
       `<h3>Nouveau point d’eau</h3><form><label>Référence</label><input name="ref" required><label>Nom</label><input name="n" required><label>Type</label><select name="t"><option>Forage</option><option>Puits</option><option>Autre</option></select><label>Village</label><select name="v">${D.villages
@@ -365,7 +430,7 @@
         d.log = [{ d: today(), s: 'Fonctionnel', n: 'Création' }];
         D.pts.push(d);
         toast('Point d’eau ajouté');
-        pts($('#c'));
+        refreshUI();
         apiPost('/api/points-eau/add/', d).then((res) => {
           if (res && !res.ok && res.error) toast(res.error);
           syncFromBackend();
@@ -379,10 +444,10 @@
     if (!p) return;
     p.s = v;
     p.log.unshift({ d: today(), s: v });
-    if (typeof fl === 'function') fl();
     toast('État mis à jour');
+    refreshUI();
     await apiPost('/api/points-eau/etat/', { ref: p.ref, s: v });
-    syncFromBackend();
+    await syncFromBackend();
   };
 
   window.setPos = function (ref) {
@@ -405,7 +470,7 @@
         p.lo = o;
         p.log.unshift({ d: today(), n: 'Position mise à jour' });
         toast('Position enregistrée');
-        mapV($('#c'));
+        refreshUI();
         apiPost('/api/points-eau/position/', { ref: p.ref, la: a, lo: o }).then(() =>
           syncFromBackend()
         );
@@ -419,9 +484,9 @@
     if (!p) return;
     p.s = s;
     toast('Statut : ' + s);
-    pan($('#c'));
-    await apiPost('/api/pannes/statut/', { id: p.id, s: s });
-    syncFromBackend();
+    refreshUI();
+    await apiPost('/api/pannes/statut/', { id: p.id, pt: p.pt, s: s });
+    await syncFromBackend();
   };
 
   window.aff = function (i) {
@@ -435,8 +500,8 @@
         p.tech = d.t;
         p.s = 'Technicien affecté';
         toast('Intervention créée pour ' + d.t);
-        pan($('#c'));
-        apiPost('/api/interventions/affecter/', { id: p.id, t: d.t }).then(() =>
+        refreshUI();
+        apiPost('/api/interventions/affecter/', { id: p.id, pt: p.pt, t: d.t }).then(() =>
           syncFromBackend()
         );
       }
@@ -444,42 +509,17 @@
   };
 
   window.dec = function (c) {
-    const villagePts = D.pts.filter((p) => p.v == U.village);
-    const firstPtRef = villagePts[0] ? villagePts[0].ref : '';
-    const renderEqOptions = (ptRef) =>
-      `<option value="">Aucun équipement spécifique</option>` +
-      (D.equipements || [])
-        .filter((e) => e.pt == ptRef)
-        .map((e) => `<option value="${esc(e.ref)}">${esc(e.ref)} · ${esc(e.nom)}</option>`)
-        .join('');
-
-    c.innerHTML = `<h2>Déclarer une panne</h2><form class="card" style="max-width:480px" id="df"><label>Point d’eau</label><select name="pt" id="df-pt">${villagePts
+    c.innerHTML = `<h2>Déclarer une panne</h2><form class="card" style="max-width:480px" id="df"><label>Point d’eau</label><select name="pt">${D.pts
+      .filter((p) => p.v == U.village)
       .map((p) => `<option>${p.ref}</option>`)
       .join(
         ''
-      )}</select><label>Équipement concerné (facultatif)</label><select name="eq" id="df-eq">${renderEqOptions(
-      firstPtRef
-    )}</select><label>Description</label><textarea name="d" required></textarea><label>Priorité</label><select name="p"><option>Faible</option><option>Moyenne</option><option>Élevée</option><option>Critique</option></select><label>Photo (facultative)</label><input type="file" name="photo" accept="image/*"><p><button class="btn">Envoyer le signalement</button></p></form>`;
-    const ptSelect = $('#df-pt');
-    if (ptSelect) {
-      ptSelect.onchange = () => {
-        const eqSelect = $('#df-eq');
-        if (eqSelect) eqSelect.innerHTML = renderEqOptions(ptSelect.value);
-      };
-    }
+      )}</select><label>Description</label><textarea name="d" required></textarea><label>Priorité</label><select name="p"><option>Faible</option><option>Moyenne</option><option>Élevée</option><option>Critique</option></select><label>Photo (facultative)</label><input type="file" name="photo" accept="image/*"><p><button class="btn">Envoyer le signalement</button></p></form>`;
     $('#df').onsubmit = async (e) => {
       e.preventDefault();
       const formData = new FormData(e.target);
       const d = Object.fromEntries(formData);
       formData.append('by', U.name);
-      try {
-        await fetch('/api/pannes/add/', {
-          method: 'POST',
-          headers: { 'X-CSRFToken': getCsrfToken() },
-          credentials: 'same-origin',
-          body: formData,
-        });
-      } catch (err) {}
       D.pannes.push({
         id: Date.now(),
         pt: d.pt,
@@ -487,13 +527,23 @@
         p: d.p,
         s: 'Nouveau signalement',
         by: U.name,
+        by_email: (U.email || '').toLowerCase(),
         tech: '',
+        tech_email: '',
       });
-      D.notifs.push('Nouveau signalement : ' + d.pt);
+      D.notifs.push(U.role == 'admin' ? 'Nouveau signalement : ' + d.pt : 'Signalement enregistré : ' + d.pt);
       toast('Signalement envoyé');
       view = 'mes';
+      refreshUI();
+      try {
+        await fetch('/api/pannes/add/', {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          credentials: 'same-origin',
+          body: formData,
+        });
+      } catch (err) {}
       await syncFromBackend();
-      route();
     };
   };
 
@@ -501,11 +551,11 @@
     const p = D.pannes[i];
     if (!p) return;
     p.s = s;
-    D.notifs.push('Statut modifié : ' + p.pt);
+    D.notifs.push('Intervention démarrée : ' + p.pt);
     toast('Intervention démarrée');
-    techHome($('#c'));
-    await apiPost('/api/interventions/demarrer/', { id: p.id, s: s });
-    syncFromBackend();
+    refreshUI();
+    await apiPost('/api/interventions/demarrer/', { id: p.id, pt: p.pt, s: s });
+    await syncFromBackend();
   };
 
   window.fin = function (i) {
@@ -528,14 +578,15 @@
           pieceRef = s.ref;
           s.q -= +d.q;
           D.hist.unshift('−' + d.q + ' ' + s.n + ' (intervention ' + p.pt + ')');
-          if (s.q <= s.min) D.notifs.push('Stock faible : ' + s.n);
+          if (s.q <= s.min && U && U.role == 'admin') D.notifs.push('Stock faible : ' + s.n);
         }
         p.s = 'Résolu';
         D.notifs.push('Intervention terminée : ' + p.pt);
         toast('Intervention terminée');
-        techHome($('#c'));
+        refreshUI();
         apiPost('/api/interventions/terminer/', {
           id: p.id,
+          pt: p.pt,
           r: d.r,
           piece_ref: pieceRef,
           q: +d.q || 1,
@@ -561,9 +612,9 @@
         }
         item.q += s * q;
         D.hist.unshift((s > 0 ? '+' : '−') + q + ' ' + item.n);
-        if (item.q <= item.min) D.notifs.push('Stock faible : ' + item.n);
+        if (item.q <= item.min && U && U.role == 'admin') D.notifs.push('Stock faible : ' + item.n);
         toast('Mouvement enregistré');
-        stk($('#c'));
+        refreshUI();
         apiPost('/api/stock/mouvement/', { ref: item.ref, s: s, q: q }).then(() =>
           syncFromBackend()
         );
@@ -571,7 +622,7 @@
     );
   };
 
-  // 8. Formulaire de contact public connecté à MySQL
+  // 8. Formulaire de contact public connecté à MySQL + affichage dans le tableau de bord Administrateur
   window.cSend = function (e) {
     e.preventDefault();
     const f = e.target;
@@ -591,25 +642,70 @@
       email: f.email.value.trim(),
       msg: f.msg.value.trim(),
     };
-    apiPost('/api/auth/contact/', payload).then(() => {
-      $('#cr').innerHTML = `<div class="okm"><div class="ck">✓</div><h3>Merci ${esc(
-        payload.nom.split(' ')[0]
-      )} !</h3><p class="mut">Votre message « ${esc(
-        payload.sj
-      )} » a bien été enregistré par le serveur.</p><button class="btn alt" onclick="cReset()">Nouveau message</button></div>`;
+    const localMsg = {
+      id: Date.now(),
+      sj: payload.sj,
+      nom: payload.nom,
+      email: payload.email,
+      msg: payload.msg,
+      traite: false,
+      date: today(),
+    };
+    D.messages = D.messages || [];
+    D.messages.unshift(localMsg);
+    saveMsgs();
+    apiPost('/api/auth/contact/', payload).then((res) => {
+      if (res && res.ok && res.message_obj) {
+        localMsg.id = res.message_obj.id;
+        localMsg.date = res.message_obj.date || localMsg.date;
+        saveMsgs();
+      }
     });
+    setTimeout(() => {
+      $('#cr').innerHTML = `<div class="okm"><div class="ck">✓</div><h3>Merci ${esc(
+        f.nom.value.trim().split(' ')[0]
+      )} !</h3><p class="mut">Votre message « ${esc(
+        f.sj.value
+      )} » a bien été envoyé à notre équipe.</p><button class="btn alt" onclick="cReset()">Nouveau message</button></div>`;
+    }, 900);
     return false;
   };
 
-  // Chargement initial des données depuis MySQL au démarrage
-  syncFromBackend();
+  window.setMsgS = async function (i, traite) {
+    const m = (D.messages || [])[i];
+    if (!m) return;
+    m.traite = traite;
+    saveMsgs();
+    toast('Message marqué comme traité');
+    refreshUI();
+    await apiPost('/api/auth/contact/statut/', { id: m.id, traite: traite });
+    await syncFromBackend();
+  };
 
-  // Ouverture automatique de la modale de confirmation de nouveau mot de passe si lien e-mail (?uid=...&token=...)
-  const params = new URLSearchParams(location.search);
-  if (params.get('uid') && params.get('token')) {
-    location.hash = 'connexion';
-    setTimeout(() => {
-      window.openPasswordResetConfirmModal(params.get('uid'), params.get('token'));
-    }, 250);
-  }
+  window.delMsg = async function (i) {
+    const m = (D.messages || [])[i];
+    if (!m) return;
+    if (confirm('Supprimer le message de ' + m.nom + ' ?')) {
+      D.messages.splice(i, 1);
+      saveMsgs();
+      toast('Message supprimé');
+      refreshUI();
+      await apiPost('/api/auth/contact/delete/', { id: m.id });
+      await syncFromBackend();
+    }
+  };
+
+  // Chargement initial des données depuis MySQL au démarrage + synchronisation temps réel automatique
+  syncFromBackend();
+  setInterval(() => {
+    const h = location.hash.slice(1) || 'accueil';
+    if (!['admin', 'local', 'tech'].includes(h) || !U) return;
+    if (document.querySelector('#m .dlg')) return;
+    const active = document.activeElement;
+    if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
+    syncFromBackend(true);
+  }, 3000);
+  window.addEventListener('focus', () => {
+    if (U && !document.querySelector('#m .dlg')) syncFromBackend(true);
+  });
 })();

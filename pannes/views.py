@@ -55,7 +55,9 @@ def api_declarer_panne(request):
             note=f"Signalement panne #{panne.id}",
         )
 
-    Notification.objects.create(message=f"Nouveau signalement : {pt.identifiant}")
+    Notification.objects.create(utilisateur=None, message=f"Nouveau signalement : {pt.identifiant}")
+    if request.user.frontend_role_code != 'admin':
+        Notification.objects.create(utilisateur=request.user, message=f"Signalement enregistré : {pt.identifiant}")
     return JsonResponse({'ok': True, 'panne': panne.to_frontend_dict()})
 
 
@@ -71,9 +73,12 @@ def api_changer_statut_panne(request):
         data = request.POST
 
     panne_id = data.get('id')
+    pt_ref = (data.get('pt') or '').strip()
     nouveau_statut = (data.get('s') or data.get('statut') or '').strip()
 
     panne = Panne.objects.filter(id=panne_id).select_related('point_eau').first()
+    if not panne and pt_ref:
+        panne = Panne.objects.filter(point_eau__identifiant=pt_ref).select_related('point_eau').order_by('-id').first()
     if not panne:
         return JsonResponse({'ok': False, 'error': 'Panne introuvable.'}, status=404)
 
@@ -93,5 +98,10 @@ def api_changer_statut_panne(request):
             note=f"Panne #{panne.id} : {nouveau_statut}",
         )
 
-    Notification.objects.create(message=f"Statut modifié : {panne.point_eau.identifiant}")
+    Notification.objects.create(utilisateur=None, message=f"Statut modifié : {panne.point_eau.identifiant}")
+    if panne.signale_par and panne.signale_par.frontend_role_code != 'admin':
+        Notification.objects.create(
+            utilisateur=panne.signale_par,
+            message=f"Statut modifié ({nouveau_statut}) : {panne.point_eau.identifiant}",
+        )
     return JsonResponse({'ok': True, 'panne': panne.to_frontend_dict()})

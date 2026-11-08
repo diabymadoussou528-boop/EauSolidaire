@@ -8,7 +8,7 @@ from pannes.models import Panne
 from interventions.models import Intervention
 from techniciens.models import Technicien
 from stock.models import PieceDetachee, MouvementStock
-from utilisateurs.models import Notification
+from utilisateurs.models import Utilisateur, Notification, MessageContact
 
 
 def initialiser_donnees_base_si_vide():
@@ -188,9 +188,33 @@ def construire_etat_complet(request):
     ]
     stock = [s.to_frontend_dict() for s in PieceDetachee.objects.all()]
     hist = [str(m) for m in MouvementStock.objects.select_related('piece').all()[:30]]
-    notifs = [n.message for n in Notification.objects.filter(lue=False)[:20]]
-    techs = [t.nom_complet for t in Technicien.objects.all()]
+    if not request.user.is_authenticated:
+        notifs = []
+        messages_contact = []
+    elif request.user.frontend_role_code == 'admin':
+        notifs = [n.message for n in Notification.objects.filter(lue=False, utilisateur__isnull=True)[:30]]
+        messages_contact = [m.to_frontend_dict() for m in MessageContact.objects.all()[:50]]
+    else:
+        notifs = [n.message for n in Notification.objects.filter(lue=False, utilisateur=request.user)[:20]]
+        messages_contact = []
+    techs_list = list(Technicien.objects.values_list('nom_complet', flat=True))
+    for u_tech in Utilisateur.objects.filter(role='TECHNICIEN', is_active=True):
+        disp = u_tech.get_display_name()
+        if disp and disp not in techs_list:
+            techs_list.append(disp)
+    techs = techs_list
     equipements = [e.to_frontend_dict() for e in Equipement.objects.select_related('point_eau').all()]
+    users_db = [
+        {
+            'role': u.frontend_role_code,
+            'nom': u.get_display_name(),
+            'email': (u.email or '').lower(),
+            'tel': u.telephone or '',
+            'village': u.village.nom if u.village else '',
+        }
+        for u in Utilisateur.objects.select_related('village').filter(is_active=True)
+        if u.frontend_role_code in ('local', 'tech')
+    ]
 
     user_data = None
     if request.user.is_authenticated:
@@ -199,6 +223,7 @@ def construire_etat_complet(request):
             'id': request.user.id,
             'email': request.user.email,
             'name': request.user.get_display_name(),
+            'nom': request.user.get_display_name(),
             'role': request.user.frontend_role_code,
             'role_db': request.user.role,
             'village': village_nom,
@@ -214,6 +239,8 @@ def construire_etat_complet(request):
             'notifs': notifs,
             'techs': techs,
             'equipements': equipements,
+            'users': users_db,
+            'messages': messages_contact,
         },
         'U': user_data,
     }

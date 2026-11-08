@@ -71,6 +71,14 @@ class Panne(models.Model):
         declarant = self.nom_declarant
         if not declarant and self.signale_par:
             declarant = self.signale_par.get_display_name()
+        by_email = (self.signale_par.email or '').lower() if self.signale_par else ''
+        tech_email = ''
+        derniere = self.interventions.select_related('technicien__utilisateur').order_by('-id').first()
+        if derniere and derniere.technicien:
+            if derniere.technicien.email:
+                tech_email = derniere.technicien.email.lower()
+            elif derniere.technicien.utilisateur:
+                tech_email = (derniere.technicien.utilisateur.email or '').lower()
         return {
             'id': self.id,
             'pt': self.point_eau.identifiant,
@@ -78,5 +86,7 @@ class Panne(models.Model):
             'p': self.niveau_gravite,
             's': self.statut,
             'by': declarant or 'Resp. Local',
+            'by_email': by_email,
             'tech': self.technicien_nom,
+            'tech_email': tech_email,
         }
